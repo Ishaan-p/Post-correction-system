@@ -44,8 +44,7 @@ device = torch.device(DEVICE_ID)
 iwav2vec = AutoModelForCTC.from_pretrained(MODEL_ID).to(DEVICE_ID)
 processor_w2v = AutoProcessor.from_pretrained(MODEL_ID)
 
-if not os.environ.get("OPENAI_API_KEY"):
-  os.environ["OPENAI_API_KEY"] = "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"
+
 client = AsyncOpenAI()
 # client = SarvamAI(
 #     api_subscription_key="",
