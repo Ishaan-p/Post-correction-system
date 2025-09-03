@@ -204,7 +204,7 @@ multi_storage_client==0.25.0
 multidict==6.6.3
 multiprocess==0.70.16
 mypy_extensions==1.1.0
-nemo_toolkit==1.23.0rc0
+nemo_toolkit==1.23.0
 nemo==7.2.3
 nerfacc==0.5.3
 nest_asyncio==1.6.0
