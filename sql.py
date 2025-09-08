@@ -12,7 +12,7 @@ from transformers import AutoModelForCTC, AutoProcessor
 
 
 BATCH_SIZE = 5
-TOTAL_SIZE = 100
+TOTAL_SIZE = 5
 
 
 ds = iter(load_dataset("ai4bharat/Lahaja",split="test", streaming=True))

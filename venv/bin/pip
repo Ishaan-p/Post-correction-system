@@ -1,4 +1,4 @@
-#!/Users/ishaanpalicha/Desktop/Programming/ITTM-Work/GujuASR/PaperCode/venv/bin/python3.12
+#!/home/ubuntu/Post-correction-system/venv/bin/python3.10
 # -*- coding: utf-8 -*-
 import re
 import sys
