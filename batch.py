@@ -1,23 +1,12 @@
 import os, certifi
 
-os.environ['SSL_CERT_FILE'] = certifi.where()
-os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
-
-from whisper_jax import FlaxWhisperForConditionalGeneration, FlaxWhisperPipline
-import psycopg2
-import jax.numpy as jnp
-from datasets import load_dataset
-import torch
-import nemo.collections.asr as nemo_asr
-import torchaudio.functional as F
-import numpy as np
-import soundfile as sf
-import tempfile
-from transformers import AutoModelForCTC, AutoProcessor
+import pandas as pd
 import asyncio
 from openai import OpenAI, AsyncOpenAI
 from jiwer import wer, compute_measures
-from sarvamai import SarvamAI
+from transformers import pipeline
+import torch
+# from sarvamai import SarvamAI
 # from langchain.chat_models.openai import ChatOpenAI
 # from langchain.embeddings import OpenAIEmbeddings
 # from langchain.vectorstores import Chroma
@@ -26,100 +15,52 @@ from sarvamai import SarvamAI
 # from langchain.retrievers.web_research import WebResearchRetriever
 # from langchain.chains import RetrievalQAWithSourcesChain, RetrievalQA
 
-N_CONCURRENCY = 1
+N_CONCURRENCY = 5
 BATCH_SIZE = 5
-TOTAL_SIZE = 100
+TOTAL_SIZE = 5
 API_KEY = ""
 
 # global iconformer, whisper_pipeline, device, iwav2vec, processor_w2v
 
 # ds = iter(load_dataset("ai4bharat/IndicVoices", "hindi", split="valid", streaming=True))
 
-iconformer = nemo_asr.models.ASRModel.from_pretrained("ai4bharat/indicconformer_stt_hi_hybrid_rnnt_large")
-whisper_pipeline = FlaxWhisperPipline('parthiv11/indic_whisper_hi_multi_gpu', dtype=jnp.bfloat16)
-DEVICE_ID = "cuda" if torch.cuda.is_available() else "cpu"
-MODEL_ID = "ai4bharat/indicwav2vec-hindi"
-device = torch.device(DEVICE_ID)
-
-iwav2vec = AutoModelForCTC.from_pretrained(MODEL_ID).to(DEVICE_ID)
-processor_w2v = AutoProcessor.from_pretrained(MODEL_ID)
 
 
-client = AsyncOpenAI()
+# client = AsyncOpenAI()
 # client = SarvamAI(
 #     api_subscription_key="",
 # )
 
-def run_asr_batch(dataset):
-    whisper_transcripts = []
-    file_paths = []
-    wav2vec_transcripts = []
-    results = []
-    references = []
+model_id = "openai/gpt-oss-20b"
 
-    for i in range(BATCH_SIZE):
-        sample = next(dataset)
-        print("Current sample:", sample['verbatim'])
+pipe = pipeline(
+    "text-generation",
+    model=model_id,
+    torch_dtype="auto",
+    device_map="auto",
+)
 
-        #IndicWhisper
+# client = AsyncOpenAI(
+   #  base_url="https://router.huggingface.co/v1",
+   #  api_key=os.getenv("HF_TOKEN"),
+#)
 
-        audio_file = sample["audio_filepath"]["array"]
-        whisper_transcripts.append(whisper_pipeline(audio_file)['text'])
-
-        #IndicConformer
-
-        audio_np = sample["audio_filepath"]["array"].astype(np.float32)
-        tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        sf.write(tmp_wav.name, audio_np, samplerate=16000)
-        file_paths.append(tmp_wav.name)
-
-        #IndicWav2Vec
-
-        resampled_audio = F.resample(torch.tensor(sample["audio_filepath"]["array"]), 48000, 16000).numpy()
-
-        input_values = processor_w2v(resampled_audio, sampling_rate=16000, return_tensors="pt").input_values
-
-        with torch.no_grad():
-            logits = iwav2vec(input_values.to(DEVICE_ID)).logits.cpu()
-        
-        output_str = processor_w2v.batch_decode(logits.numpy()).text
-        wav2vec_transcripts.append(output_str[0])
+reference = pd.read_csv("./reference.csv")
+conformer = pd.read_csv("./conformer_transcripts.csv")
+whisper = pd.read_csv("./new_whisper_transcripts.csv")
+wav2vec = pd.read_csv("./wav2vec_transcripts.csv")
 
 
-        references.append(sample["verbatim"])
-
-        print("File paths:", file_paths)
-
-
-    #IndicConformer
-
-    iconformer.freeze() # inference mode
-    iconf = iconformer.to(device) # transfer model to device
-
-    iconf.cur_decoder = "ctc"
-    ctc_text = iconf.transcribe(file_paths, batch_size=BATCH_SIZE, logprobs=False, language_id='hi')[0]
-
-    print("CTC Text:", ctc_text, "| Length:", len(ctc_text))
-
-    for _ in range(BATCH_SIZE):
-        h1 = ctc_text[_]
-        h2 = wav2vec_transcripts[_]
-        h3 = whisper_transcripts[_]
-        results.append((h1, h2, h3, references[_]))
-
-    return results
 
 def collect_database():
-    conn = psycopg2.connect(host="localhost", dbname="postgres", user="postgres", password="9545", port=5432)
+    results = []
+    for _ in range(TOTAL_SIZE):
+        conformer_row = conformer[conformer["id"] == _+1]
+        whisper_row = whisper[whisper["id"] == _+1]
+        wav2vec_row = wav2vec[wav2vec["id"] == _+1]
+        reference_row = reference[reference["id"] == _+1]
 
-    # Open a cursor to perform database operations
-    cur = conn.cursor()
-
-    cur.execute("""SELECT conf, w2v, wh, reference FROM transcripts""")
-    results = cur.fetchall()
-
-    cur.close()
-    conn.close()
+        results.append((conformer_row["conf"].values[0], wav2vec_row["w2v"].values[0], whisper_row["wh"].values[0], reference_row["ref"].values[0]))
 
     return results
 
@@ -132,91 +73,91 @@ async def correct_one(h1, h2, h3):
 
         Example 1:
         <hypothesis1>जी नमस्ते जी बोलिए</hypothesis1> 
-        <hypothesis2>क प</hypothesis2> 
+        <hypothesis2>जी नमस्ते जी बुलिये</hypothesis2> 
         <hypothesis3>जी नमस्ते जी बोल्गे</hypothesis3> 
 
         Your output: जी नमस्ते जी बोलिए
 
         Example 2:
         <hypothesis1>जी</hypothesis1> 
-        <hypothesis2></hypothesis2> 
+        <hypothesis2>वे</hypothesis2> 
         <hypothesis3>धन्यवाद</hypothesis3>
 
         Your output: जी
 
         Example 3:
         <hypothesis1>अगर आपका बच्चा चला जाएगा तो फिर उनका लॉस हो जाएगा ना ब अगर हम आपको छुट्टी दे भी रहे हैं तो मैम आपका चार्ज ज़्यादा लगेगा</hypothesis1> 
-        <hypothesis2></hypothesis2> 
+        <hypothesis2>अगर आपका बच्चा चला जाएगा तो फिर उनका लॉस हो जाएगा न  अगर हम आपको छुट्टी देभी रहै तो महम आपका चार ज्यादा लगेगा</hypothesis2> 
         <hypothesis3>अगर आपका बच्चा चला जायेगा तो फिर उनका लॉस हो जायेगा न बस अगर हम आपको छुट्टी दे भी रहे तो माम आपका चार्ज ज्यादा लगेगा</hypothesis3> 
 
         Your output: अगर आपका बच्चा चला जाएगा तो फिर उनका लॉस हो जाएगा ना बट अगर हम आपको छुट्टी दे भी रहे हैं तो मैम आपका साल ज्यादा लगेगा
 
         Example 4:
         <hypothesis1>जी बिल्कुल</hypothesis1> 
-        <hypothesis2></hypothesis2> 
+        <hypothesis2>दजी बुलकू</hypothesis2> 
         <hypothesis3>तुझी भूल कर</hypothesis3>
 
         Your output: जी बिल्कुल
 
         Example 5:
         <hypothesis1>जी जी वैसे दो ढाई जन लग रहा है</hypothesis1> 
-        <hypothesis2>ा का क</hypothesis2> 
+        <hypothesis2>तजी जी वैसे दो ढाइडर लग रहा है</hypothesis2> 
         <hypothesis3>जीजी वैसे दो ढाई जल लग रहा </hypothesis3>
   
         Your output: जी जी वैसे दो ढाई हजार लग रहा है
 
         Example 6:
         <hypothesis1>ढाई हजार लग रहा है तो ठीक है हम चार्ज तो नहीं कम कर सकते हैं आप बीच में भी बीच में जा ही रही हैं और बच्चे का लॉस भी होगा</hypothesis1> 
-        <hypothesis2>क क क र</hypothesis2> 
+        <hypothesis2>डाइगर लग रहा है तो ठीक है हम चाज तो नहीं कम कर सकते हैं आप अबी इस में भी भीच में जाही नहीं हैं और बच्चे का लॉस भी होगा</hypothesis2> 
         <hypothesis3>ढाई अज़र लग रहा है तू थी एक है चार्ज तो नहीं कम कर सकते है आपको बीच में भी बीच में जाए ही नहीं है और बच्चे का लॉस भी होगा</hypothesis3>
 
         Your output: ढाई हजार लग रहा है दो तो ठीक है हम चार्ज तो नहीं कम कर सकते हैं आप बीच में भी बीच में जा ही रही हैं और बच्चे का लॉस भी होगा 
 
         Example 7:
         <hypothesis1>और आप तो ये भी बोल रहे हो कि मतलब बच्चा है तो अकेले नहीं छोड़ेंगे आपकी भी बात सही है किसी बच्चे को तो भई माँ के बिना तो आप जा रही हो तो आपकी तो चिंता बनी ही रहेगी सही बात है</hypothesis1> 
-        <hypothesis2>क क क क क</hypothesis2> 
+        <hypothesis2>और आपतो यदि बोल रहे हो कि मलबच्चा है तो अकेले नहीं छोड़ेंगे आपकी भी बात सही है किसी बच्चे को तो बई माँ के बिना तो आप जा रहे है तो आपकी तो चिंता बने ही रहेगी सही बात है</hypothesis2> 
         <hypothesis3>और आप तो यदि बोल रहे हो की मतलब बच्चा है तो अकेले नहीं छोड़ेंगे आपकी भी बात सही है किसी बच्चे को तो माँ के बिना तो आप जा रहे हैं तो आपकी तो चिंता बनी ही रहेगी सही बात है</hypothesis3>
 
         Your output: और आप तो ये भी बोल रहे हो कि मतलब बच्चा है तो अकेले नहीं छोडेंगे आपकी भी बात सही हैं किसी बच्चे को तो भाई माँ के बिना तो आप जा रही हैं सो आपकी तो चिंता बनी ही रहेगी सही बात है
 
         Example 8:
         <hypothesis1>बट आप क रही हैं तो ठीक है हम आपको छुट्टी दे दे रहे हैं बट जो भी इनकी तैयारी है आप वहाँ पे कराते रहिएगा क्योंकि भई बच्चे</hypothesis1> 
-        <hypothesis2>प क पर क ा</hypothesis2> 
+        <hypothesis2>बस आप कह रहे हैं तो ठीक ह हम आपको छुट्ठी दे दे रहा हैं जो भी इनकी तैयारी है आप वहां पि खराते रहिएगा क्योंकि भी बच्चे </hypothesis2> 
         <hypothesis3>बस आप कह रही है तो ठीक है हम आपको छुट्टी दे दे रहा है जो भी इनकी तैयारी है आप वहाँ ऐसी करते रहियेगा क्यूँकी भाई बच्चे</hypothesis3>
 
         Your output: बट आप क केह रही हैं तो ठीक है हम आपको छुट्टी दे दे रहे हैं बट जो भी इनकी तैयारी है आप वहाँ पे कराते रहिएगा क्योंकि भाई बच्चे
 
         Example 9:
         <hypothesis1>जी बिल्कुल बिल्कुल ठीक</hypothesis1> 
-        <hypothesis2>ा र के प</hypothesis2> 
+        <hypothesis2>जी बिल्कुल बिल्कुल ठीक </hypothesis2> 
         <hypothesis3>जी बिल्कुल बिल्कुल ठीक</hypothesis3>
 
         Your output: जी बिलकुल बिलकुल ठीक
 
         Example 10:
         <hypothesis1>जी तो कितने दिन की चाहिए डेस बता दीजिए</hypothesis1> 
-        <hypothesis2>ा क क क</hypothesis2> 
+        <hypothesis2>छी तो कितने दिन की चाहिए डेर बता दीजिए</hypothesis2> 
         <hypothesis3>जी तो कितने दिन के चाहिए ढेर बता दीजिए</hypothesis3>
 
         Your output: जी तो कितने दिन की चाहिए डे बता दीजिए
 
         Example 11:
         <hypothesis1>ओके ऐसे ही आपको जाना कौन सी जगह पर है</hypothesis1> 
-        <hypothesis2>क क का क</hypothesis2> 
+        <hypothesis2>केऐसे आपको जाना कौंस जगह पर</hypothesis2> 
         <hypothesis3>एक्सपेनेम ऐसे आपको जाना कौन सी जगह पर है</hypothesis3> 
 
         Your output: ओके ऐसे आपको जाना कौनसी जगह पर है
 
         Example 12:
         <hypothesis1>तो ताजमहल घुमाने जा रही हैं बच्चे को</hypothesis1> 
-        <hypothesis2>ा</hypothesis2> 
+        <hypothesis2>तो ताडमल गमाने जारहे बच्चे को</hypothesis2> 
         <hypothesis3>तो साजना घुमाने जा रही है बच्चे को</hypothesis3> 
 
         Your output: तो ताजमहल घुमाने जा रही हैं बच्चे को
 
         Example 13:
         <hypothesis1>ओके मैम ठींक है</hypothesis1> 
-        <hypothesis2>ा</hypothesis2> 
+        <hypothesis2>ओके मैम इनका</hypothesis2> 
         <hypothesis3>ओके माम थाने क्या</hypothesis3>
 
         Your output: ओके मैम ठीक है
@@ -267,15 +208,24 @@ async def correct_one(h1, h2, h3):
         <hypothesis3>{h3}</hypothesis3>
 '''
 
-    resp = await client.chat.completions.create(
-        model="gpt-4.1",
-        messages=[{"role":"user","content":prompt}],
-        temperature=0,
-        # top_p=1,
-        # max_tokens=4096,
+    messages=[{"role":"user","content":prompt}]
+
+    outputs = pipe(
+      messages,
+      max_new_tokens=4096,
     )
-    
-    return resp.choices[0].message.content.strip()
+
+    raw = outputs[0]["generated_text"][-1]["content"]
+
+    # If the model outputs markers like "assistantfinal"
+    if "assistantfinal" in raw:
+      # Split and take everything after the marker
+      final_answer = raw.split("assistantfinal", 1)[1].strip()
+    else:
+      # If no marker, just take the raw text
+      final_answer = raw.strip()
+
+    return final_answer
 
 async def correct_batch(asr_results):
     sem = asyncio.Semaphore(N_CONCURRENCY)
